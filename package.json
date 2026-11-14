@@ -1,0 +1,62 @@
+{
+  "name": "@runmu.sh/ext-navcomp",
+  "version": "0.1.0",
+  "description": "Torchship's solar system and flight console as panels: a live, explorable System map (always for admins; for a pilot at a powered console, their ship and sensor contacts) and a Navigation panel that drives the =nav console, from GMCP Space and Ship.",
+  "keywords": ["torchship", "navigation", "solar system", "map", "orbit", "gmcp", "panel"],
+  "license": "MIT",
+  "homepage": "https://runmu.sh/marketplace/x/navcomp",
+  "repository": { "type": "git", "url": "git+https://github.com/runmu-sh/ext-navcomp.git" },
+  "bugs": { "url": "https://github.com/runmu-sh/ext-navcomp/issues" },
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./src/model.ts",
+  "files": ["dist", "schema", "src/model.ts", "src/orbit.ts", "README.md", "CHANGELOG.md"],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/dev.mjs",
+    "typecheck": "tsc --noEmit",
+    "check": "node scripts/build.mjs --check",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@muclient/sdk": "npm:@runmu.sh/sdk@^1.16.0",
+    "@runmu.sh/dev": "^0.5.0",
+    "esbuild": "^0.28.2",
+    "happy-dom": "^20.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": { "node": ">=20" },
+  "muclient": {
+    "id": "navcomp",
+    "api": "^1.14",
+    "source": "src/index.ts",
+    "displayName": "Navcomp",
+    "description": "Torchship's solar system and flight console as panels: a live, explorable System map (always for admins; for a pilot at a powered console, their ship and sensor contacts) and a Navigation panel that drives the =nav console, from GMCP Space and Ship.",
+    "categories": ["interface"],
+    "activation": ["onGmcp:Space", "onGmcp:Ship"],
+    "contributes": {
+      "panels": [
+        { "id": "navcomp.map", "title": "System map", "order": 60, "defaultPosition": "float", "show": "auto", "singleton": true },
+        { "id": "navcomp.nav", "title": "Navigation", "order": 61, "defaultPosition": "right-top", "show": "auto", "singleton": true }
+      ],
+      "gmcp": [
+        {
+          "package": "Space 1",
+          "messages": {
+            "Space.System": { "dir": "in", "schema": "schema/system.json" },
+            "Space.Traffic": { "dir": "in", "schema": "schema/traffic.json" },
+            "Space.Get": { "dir": "out", "schema": "schema/empty.json" }
+          }
+        },
+        {
+          "package": "Ship 1",
+          "messages": {
+            "Ship.Nav": { "dir": "in", "schema": "schema/nav.json" }
+          }
+        }
+      ]
+    },
+    "capabilities": ["send-commands"],
+    "publisher": "bitmuse"
+  }
+}

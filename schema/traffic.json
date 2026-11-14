@@ -1,0 +1,23 @@
+{
+  "$comment": "Space.Traffic: ships. Admins see every ship; a seated pilot their own (self) and sensor-contact ships.",
+  "type": "object",
+  "required": ["vessels"],
+  "properties": {
+    "admin": { "type": ["boolean", "integer"] },
+    "now": { "type": "number" }, "ic": { "type": "number" }, "rate": { "type": "number" },
+    "vessels": {
+      "type": "array",
+      "items": {
+        "type": "object", "required": ["id", "name", "pos"],
+        "properties": {
+          "id": { "type": "string" }, "name": { "type": "string" }, "hull": { "type": "string" },
+          "burning": { "type": ["boolean", "integer"] }, "parent": { "type": ["string", "null"] },
+          "o": { "type": ["object", "string", "null"] },
+          "pos": { "type": "array", "items": { "type": "number" }, "$comment": "[x, y] AU heliocentric" },
+          "vel": { "type": "array", "items": { "type": "number" }, "$comment": "[x, y] m per real second" },
+          "self": { "type": ["boolean", "integer"] }, "target": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "$comment": "Space.System: the catalog. {active:false} when the session may not see it. \"#-1\" is null throughout.",
+  "type": "object",
+  "required": ["active"],
+  "properties": {
+    "active": { "type": ["boolean", "integer"] },
+    "admin": { "type": ["boolean", "integer"] },
+    "now": { "type": "number", "$comment": "server real time, unix seconds (float)" },
+    "ic": { "type": "number", "$comment": "in-character time at now, unix-scale seconds" },
+    "rate": { "type": "number", "$comment": "IC seconds per real second" },
+    "root_id": { "type": "string" },
+    "bodies": { "type": "array", "items": { "$ref": "#/$defs/body" } },
+    "stations": { "type": "array", "items": { "$ref": "#/$defs/station" } },
+    "landing_sites": { "type": "array", "items": { "$ref": "#/$defs/site" } },
+    "factions": { "type": "array", "items": { "type": "object", "required": ["id", "name"], "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "color": { "type": "string" } } } }
+  },
+  "$defs": {
+    "elements": {
+      "type": ["object", "string", "null"],
+      "$comment": "Keplerian elements around the parent: a (AU), e, om (rad), M0 (rad at ep), ep (real unix s), rate, dir -1 retrograde; \"#-1\" for none.",
+      "properties": { "a": { "type": "number" }, "e": { "type": "number" }, "om": { "type": "number" }, "M0": { "type": "number" }, "ep": { "type": "number" }, "rate": { "type": "number" }, "dir": { "type": "number" } }
+    },
+    "body": {
+      "type": "object", "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "string" }, "name": { "type": "string" }, "type": { "type": "string" }, "parent": { "type": ["string", "null"] },
+        "mu": { "type": "number" }, "r_km": { "type": "number" }, "featured": { "type": ["boolean", "integer"] },
+        "influence": { "type": "object", "properties": { "faction": { "type": ["string", "array"] }, "Rsys": { "type": "number" } } },
+        "o": { "$ref": "#/$defs/elements" }
+      }
+    },
+    "station": {
+      "type": "object", "required": ["id", "name", "parent"],
+      "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "parent": { "type": ["string", "null"] }, "blurb": { "type": "string" }, "owner": { "type": ["string", "null"] }, "influence_au": { "type": ["number", "string", "null"] }, "o": { "$ref": "#/$defs/elements" } }
+    },
+    "site": {
+      "type": "object", "required": ["id", "name", "parent"],
+      "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "parent": { "type": ["string", "null"] }, "owner": { "type": ["string", "null"] }, "blurb": { "type": "string" } }
+    }
+  }
+}

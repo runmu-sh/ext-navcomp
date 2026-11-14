@@ -1,0 +1,26 @@
+{
+  "$comment": "Ship.Nav: the pilot console (=status / =nav as data) while seated at a powered cockpit; {active:false} otherwise.",
+  "type": "object",
+  "required": ["active"],
+  "properties": {
+    "active": { "type": ["boolean", "integer"] },
+    "console": { "type": "string" },
+    "ship": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "squawk": { "type": "string" } } },
+    "scrambled": { "type": "array", "items": { "type": "string" } },
+    "pos": { "type": "array", "items": { "type": "number" } },
+    "vel": { "type": "array", "items": { "type": "number" } },
+    "orbit": { "type": "object", "properties": { "body": { "type": "string" }, "body_id": { "type": "string" }, "alt_km": { "type": "number" }, "v_kms": { "type": "number" }, "period": { "type": ["number", "string"] }, "course": { "type": "string" } } },
+    "contacts": { "type": "array", "items": { "$ref": "#/$defs/contact" } },
+    "destinations": { "type": "array", "items": { "$ref": "#/$defs/contact" } },
+    "burn": { "type": "object", "properties": { "g": { "type": "number" }, "min": { "type": "number" }, "max": { "type": "number" }, "rating": { "type": "number" } } },
+    "combat": { "type": ["boolean", "integer"] },
+    "crippled": { "type": "array", "items": { "type": "string" } },
+    "comms": { "type": "string" },
+    "coast": { "type": "array", "items": { "type": "string" } },
+    "plan": { "type": ["object", "integer"], "$comment": "0 when no course is plotted" },
+    "under_way": { "type": ["object", "integer"], "$comment": "0 when no burn is under way" }
+  },
+  "$defs": {
+    "contact": { "type": "object", "required": ["name"], "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "kind": { "type": "string" }, "dist_au": { "type": "number" } } }
+  }
+}
