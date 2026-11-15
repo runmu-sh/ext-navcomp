@@ -5,7 +5,8 @@
  */
 import { h } from '@muclient/sdk';
 import { COPY } from './copy';
-import { chainOf, childBodies, frameExtent, frameOfVessel, frameSites, frameStations, hasFrame, posOf, vesselPos, type Body, type Catalog, type Nav, type Site, type Station, type Thing, type Traffic, type Vessel } from './model';
+import { burnDuration, burnFlip, burnState, type BurnLeg } from './burn';
+import { chainOf, childBodies, frameExtent, frameOfVessel, frameSites, frameStations, hasFrame, posOf, targetAt, vesselPos, type Body, type Catalog, type Nav, type Site, type Station, type Thing, type Traffic, type Vessel } from './model';
 import { AU_M, ellipse, fmtDist, fmtDur, fmtIC, fmtKms, orbitSpeed, period, type Vec } from './orbit';
 
 export interface MapData { cat: Catalog | null; catWall: number; traffic: Traffic | null; nav: Nav | null }
@@ -268,7 +269,7 @@ export class MapView {
       if (f === this.frame) return true;
       // Your own ship shows in every frame above its own (the course line starts there); burning ships in Sol.
       if (v.self) return chainOf(cat, f).some((b) => b.id === this.frame);
-      return v.burning && this.frame === cat.rootId && chain.size > 0;
+      return v.burning && chainOf(cat, f).some((b) => b.id === this.frame) && chain.size > 0;
     });
   }
 
@@ -556,21 +557,32 @@ export class MapView {
 
     // Ships and the course.
     const sentAt = traffic?.now ?? t;
+    const tgt = targetAt(cat, traffic ?? null, sentAt);
     const me = traffic?.vessels.find((v) => v.self);
-    const aim = nav?.under_way?.aim ?? nav?.plan?.aim ?? null;
-    const wp = nav?.plan?.waypoint ?? null;
-    if (me && aim && ships.includes(me)) {
-      const a = proj(vesselPos(cat, me, t, sentAt, memo));
-      ctx.strokeStyle = nav?.plan?.blocked ? P.alert : P.bright; ctx.lineWidth = 1; ctx.setLineDash([5, 4]);
-      ctx.beginPath(); ctx.moveTo(a.x, a.y);
-      if (wp && (wp.x !== aim.x || wp.y !== aim.y)) { const w = proj(wp); ctx.lineTo(w.x, w.y); }
-      const b = proj(aim); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
-      ctx.strokeStyle = nav?.plan?.blocked ? P.alert : P.bright; ctx.beginPath(); ctx.arc(b.x, b.y, 5, 0, TAU); ctx.moveTo(b.x - 8, b.y); ctx.lineTo(b.x + 8, b.y); ctx.moveTo(b.x, b.y - 8); ctx.lineTo(b.x, b.y + 8); ctx.stroke();
+    const course = courseOf(nav, me ?? null);
+    if (me && ships.includes(me) && course) {
+      const blocked = !!nav?.plan?.blocked;
+      this.drawCourse(ctx, proj, cat, center, frame.id, t, course, tgt, blocked ? P.alert : P.bright, P, label);
+    } else if (me && ships.includes(me)) {
+      // No flyable leg (a blocked plan, an old server): the straight line to the aim, as before.
+      const aim = nav?.under_way?.aim ?? nav?.plan?.aim ?? null;
+      const wp = nav?.plan?.waypoint ?? null;
+      if (aim) {
+        const a = proj(vesselPos(cat, me, t, sentAt, memo, traffic));
+        ctx.strokeStyle = nav?.plan?.blocked ? P.alert : P.bright; ctx.lineWidth = 1; ctx.setLineDash([5, 4]);
+        ctx.beginPath(); ctx.moveTo(a.x, a.y);
+        if (wp && (wp.x !== aim.x || wp.y !== aim.y)) { const w = proj(wp); ctx.lineTo(w.x, w.y); }
+        const b = proj(aim); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
+        crosshair(ctx, b, nav?.plan?.blocked ? P.alert : P.bright);
+      }
     }
+    // Other burning ships (an admin sees them all): their path from here to arrival, faint gold.
+    for (const v of ships) if (v.burning && v.burn && !v.self) this.drawCourse(ctx, proj, cat, center, frame.id, t, { legs: [v.burn], from: v.burn.t_start, live: true }, tgt, P.gold, P, null, 0.45);
     for (const v of ships) {
-      const sp = proj(vesselPos(cat, v, t, sentAt, memo));
+      const sp = proj(vesselPos(cat, v, t, sentAt, memo, traffic));
       const col = v.self ? P.ok : v.burning ? P.gold : P.fg;
-      const ang = Math.atan2(-v.vel.y, v.vel.x);
+      const vv = v.burning && v.burn ? burnState(v.burn, t, tgt).vel : v.vel;
+      const ang = Math.atan2(-vv.y, vv.x);
       if (v.burning) { ctx.strokeStyle = P.gold; ctx.globalAlpha = 0.6; ctx.beginPath(); ctx.moveTo(sp.x, sp.y); ctx.lineTo(sp.x - 12 * Math.cos(ang), sp.y - 12 * Math.sin(ang)); ctx.stroke(); ctx.globalAlpha = 1; }
       ctx.save(); ctx.translate(sp.x, sp.y); ctx.rotate(ang);
       ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(6, 0); ctx.lineTo(-4, 3.6); ctx.lineTo(-2, 0); ctx.lineTo(-4, -3.6); ctx.closePath(); ctx.fill();
@@ -592,6 +604,96 @@ export class MapView {
     }
     void AU_M;
   }
+
+  /**
+   * One course: each leg sampled on the game's own profile from `from` to its arrival, drawn RELATIVE TO THE FRAME
+   * BODY at each instant (the path the ship traces as seen in this frame), the flown part solid and the rest dashed;
+   * a tick at the flip, a diamond at a limb waypoint, a crosshair at the aim with the time to go, and the target
+   * where it will be at arrival (a hollow square). `label` null: no marks (other ships).
+   */
+  private drawCourse(ctx: CanvasRenderingContext2D, proj: (p: Vec) => Vec, cat: Catalog, center: Vec, frameId: string, t: number,
+    course: Course, tgt: ReturnType<typeof targetAt>, color: string, P: Palette,
+    label: ((text: string, x: number, y: number, hot: boolean, color?: string, pri?: number) => void) | null, alpha = 1) {
+    const frameBody = cat.bodies.get(frameId)!;
+    const rel = (p: Vec, at: number): Vec => {
+      // The frame body moves during a long burn: put each sample where it is relative to the body then, about the body now.
+      if (frameId === cat.rootId) return p;
+      const c = posOf(cat, frameBody, at);
+      return { x: center.x + p.x - c.x, y: center.y + p.y - c.y };
+    };
+    ctx.save(); ctx.globalAlpha = alpha; ctx.lineWidth = 1; ctx.strokeStyle = color;
+    const N = 96;
+    course.legs.forEach((L, i) => {
+      const t0 = i === 0 ? Math.max(L.t_start, course.from) : L.t_start;
+      const end = L.t_start + burnDuration(L);
+      if (!(end > t0)) return;
+      // Samples bunch where the ship is slow (ignition, arrival) so the ends stay smooth: u in [0,1] → (1 − cos πu)/2.
+      const pts: { t: number; s: Vec }[] = [];
+      for (let k = 0; k <= N; k++) { const at = t0 + (end - t0) * (1 - Math.cos((Math.PI * k) / N)) / 2; pts.push({ t: at, s: proj(rel(burnState(L, at, tgt).pos, at)) }); }
+      const stroke = (from: number, to: number, dash: number[]) => {
+        const seg = pts.filter((q) => q.t >= from && q.t <= to);
+        if (seg.length < 2) return;
+        ctx.setLineDash(dash); ctx.beginPath(); seg.forEach((q, j) => (j ? ctx.lineTo(q.s.x, q.s.y) : ctx.moveTo(q.s.x, q.s.y))); ctx.stroke();
+      };
+      const now = Math.min(Math.max(t, t0), end);
+      if (course.live) { stroke(t0, now, []); stroke(now, end, [5, 4]); }
+      else stroke(t0, end, L.est ? [2, 4] : [5, 4]);
+      ctx.setLineDash([]);
+      if (!label) return;
+      const fl = burnFlip(L);
+      if (fl && fl > t0 && fl < end) {
+        const a = proj(rel(burnState(L, fl - 1, tgt).pos, fl - 1)), b = proj(rel(burnState(L, fl + 1, tgt).pos, fl + 1));
+        const nx = -(b.y - a.y), ny = b.x - a.x, n = Math.hypot(nx, ny) || 1;
+        const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        ctx.beginPath(); ctx.moveTo(m.x - (5 * nx) / n, m.y - (5 * ny) / n); ctx.lineTo(m.x + (5 * nx) / n, m.y + (5 * ny) / n); ctx.stroke();
+        if (fl > t) label(COPY.markFlip, m.x, m.y + 7, false, color, 3);
+      }
+      const last = i === course.legs.length - 1;
+      const ep = pts.at(-1)!.s;
+      if (!last) { diamond(ctx, ep.x, ep.y, 3.5, color); label(COPY.markLimb, ep.x, ep.y + 7, false, P.dim, 3); return; }
+      if (course.then) {
+        // Leg 1 of a limb route under way: leg 2 is solved at the limb, so only where it ends is known.
+        const tg = tgt(course.then.id, course.then.t);
+        diamond(ctx, ep.x, ep.y, 3.5, color); label(COPY.markLimb, ep.x, ep.y + 7, false, P.dim, 3);
+        if (!tg) return;
+        const q = proj(rel(tg.pos, course.then.t));
+        ctx.setLineDash([2, 4]); ctx.beginPath(); ctx.moveTo(ep.x, ep.y); ctx.lineTo(q.x, q.y); ctx.stroke(); ctx.setLineDash([]);
+        crosshair(ctx, q, color);
+        const left = course.then.t - t;
+        if (left > 0) label(COPY.markArrive(fmtDur(left * cat.rate)), q.x, q.y + 10, false, color, 8);
+        return;
+      }
+      // The aim, and the target there at arrival (it is where the ship stops when stop_m is 0).
+      crosshair(ctx, ep, color);
+      const tg = L.tbody ? tgt(L.tbody, end) : null;
+      if (tg && L.stop_m > 0) {
+        const q = proj(rel(tg.pos, end));
+        ctx.strokeRect(q.x - 3.5, q.y - 3.5, 7, 7);
+      }
+      const left = (course.tFinal ?? end) - t;
+      if (left > 0) label(COPY.markArrive(fmtDur(left * cat.rate)), ep.x, ep.y + 10, false, color, 8);
+    });
+    ctx.restore();
+  }
+}
+
+/** What the course line is made of: the legs, the time the path starts, whether it is being flown. */
+export interface Course { legs: BurnLeg[]; from: number; live: boolean; tFinal?: number | null; then?: { id: string; t: number } | null }
+/**
+ * The course to draw for your ship: under way, the leg being flown (from ignition: the flown part goes solid; leg 2
+ * of a limb route is solved at the handoff, so only the current leg is known); a plan, its legs from now. null when
+ * there is no flyable leg. Exported for tests.
+ */
+export function courseOf(nav: Nav | null, me: Vessel | null): Course | null {
+  const uw = nav?.under_way;
+  if (uw) { const L = uw.burn ?? me?.burn ?? null; return L ? { legs: [L], from: L.t_start, live: true, tFinal: uw.t_final, then: uw.leg === 1 && uw.t_final && uw.target.id ? { id: uw.target.id, t: uw.t_final } : null } : null; }
+  const p = nav?.plan;
+  if (p && !p.lost && p.legs.length) return { legs: p.legs, from: p.legs[0]!.t_start, live: false };
+  return null;
+}
+function crosshair(ctx: CanvasRenderingContext2D, b: Vec, color: string) {
+  ctx.strokeStyle = color; ctx.setLineDash([]);
+  ctx.beginPath(); ctx.arc(b.x, b.y, 5, 0, TAU); ctx.moveTo(b.x - 8, b.y); ctx.lineTo(b.x + 8, b.y); ctx.moveTo(b.x, b.y - 8); ctx.lineTo(b.x, b.y + 8); ctx.stroke();
 }
 
 function bodyColor(b: Body, P: Palette) {

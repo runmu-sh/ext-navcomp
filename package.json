@@ -1,6 +1,6 @@
 {
   "name": "@runmu.sh/ext-navcomp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Torchship's solar system and flight console as panels: a live, explorable System map (always for admins; for a pilot at a powered console, their ship and sensor contacts) and a Navigation panel that drives the =nav console, from GMCP Space and Ship.",
   "keywords": ["torchship", "navigation", "solar system", "map", "orbit", "gmcp", "panel"],
   "license": "MIT",

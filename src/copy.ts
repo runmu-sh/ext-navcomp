@@ -52,6 +52,10 @@ export const COPY = {
   fSpeed: 'Speed',
   fState: 'State',
   fBound: 'Bound for',
+  // course marks drawn on the map (uppercase via the canvas)
+  markFlip: 'flip',
+  markLimb: 'limb',
+  markArrive: (d: string) => `eta ${d}`,
   fRange: 'Range',
   fStations: 'Stations',
   fSites: 'Landing sites',

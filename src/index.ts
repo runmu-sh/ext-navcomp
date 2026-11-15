@@ -18,9 +18,10 @@ import { MapView, type Palette } from './map';
 import { NavView } from './nav';
 
 export { COPY } from './copy';
-export { catalogOf, elementsOf, navOf, trafficOf, posOf, vesselPos, chainOf, frameExtent, tagOf, planOf } from './model';
+export { catalogOf, elementsOf, navOf, trafficOf, posOf, vesselPos, vesselState, targetAt, legOf, chainOf, frameExtent, tagOf, planOf } from './model';
+export * from './burn';
 export type { Catalog, Nav, Traffic, Body, Station, Site, Vessel, NavPlan, NavContact } from './model';
-export { projector, navName } from './map';
+export { projector, navName, courseOf } from './map';
 export { targetRows, clampG } from './nav';
 export * from './orbit';
 

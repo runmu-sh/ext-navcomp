@@ -138,6 +138,76 @@ test('traffic: ships parse; a coasting ship follows its elements, a burning one 
   assert.equal(M.trafficOf({}), null);
 });
 
+const BURNS = fx('burns.json');
+test('burn: the ported profile matches $space:_burn_state on live legs (a 0.92 AU body leg, a rendezvous with lateral speed, a limb leg riding Earth with toff)', () => {
+  const c = M.catalogOf(SYSTEM);
+  // The fixtures' targets are sampled positions; replay them as the target so only the profile is under test.
+  for (const [name, b] of Object.entries(BURNS)) {
+    const L = M.legOf(b.leg);
+    assert.ok(L, `${name} parses`);
+    const at = (id, t) => { const s = b.samples.reduce((m, x) => (Math.abs(x.t - t) < Math.abs(m.t - t) ? x : m)); return Math.abs(s.t - t) < 1e-3 ? { pos: { x: s.tpos[0], y: s.tpos[1] }, vel: { x: 0, y: 0 } } : null; };
+    for (const s of b.samples) {
+      const st = M.burnState(L, s.t, at);
+      const km = Math.hypot(st.pos.x - s.pos[0], st.pos.y - s.pos[1]) * M.AU_KM;
+      assert.ok(km < 0.01, `${name} at +${(s.t - L.t_start).toFixed(0)}s off by ${km} km`);
+    }
+    assert.ok(Math.abs(M.burnDuration(L) - b.tf) < 1e-3, `${name} duration ${M.burnDuration(L)} vs ${b.tf}`);
+    assert.ok(Math.abs(M.burnFlip(L) - b.t_flip) < 1e-3, `${name} flip`);
+  }
+  // Velocity: with the target's true velocity the server's own vel comes back (Mars ignition, at rest relative to Mars' frame).
+  const mars = M.legOf(BURNS.Mars.leg);
+  const s0 = M.burnState(mars, mars.t_start, () => ({ pos: mars.tpos0, vel: mars.tvel0 }));
+  assert.ok(Math.hypot(s0.vel.x - BURNS.Mars.samples[0].vel[0], s0.vel.y - BURNS.Mars.samples[0].vel[1]) < 1, 'ignition velocity');
+  // The catalog's own Mars (no replayed target) lands within a few thousand km at arrival: the fixtures were
+  // captured a few game hours after system.json, and Mars' orbit is the same elements.
+  const end = mars.t_start + M.burnDuration(mars);
+  const live = M.burnState(mars, end, M.targetAt(c, null, end));
+  const mp = M.posOf(c, c.bodies.get('4507'), end);
+  assert.ok(Math.abs(Math.hypot(live.pos.x - mp.x, live.pos.y - mp.y) * M.AU_KM - 3796.19) < 1, 'arrives at the parking radius (3,796 km) from Mars');
+  // The KMER rendezvous ends on KMER (stop 0); the curve bows off the straight line (lateral vl and a moving target).
+  const k = M.legOf(BURNS.KMER.leg), kEnd = BURNS.KMER.samples.at(-1);
+  const mid = BURNS.KMER.samples[3], a0 = BURNS.KMER.samples[0];
+  const dev = Math.abs((kEnd.pos[0] - a0.pos[0]) * (mid.pos[1] - a0.pos[1]) - (kEnd.pos[1] - a0.pos[1]) * (mid.pos[0] - a0.pos[0])) / Math.hypot(kEnd.pos[0] - a0.pos[0], kEnd.pos[1] - a0.pos[1]) * M.AU_KM;
+  assert.ok(dev > 1000, `the KMER path bows ${dev} km off the chord`);
+  assert.equal(k.tbody, '4850');
+  // Garbage is not a leg.
+  assert.equal(M.legOf({ a: 1 }), null);
+  assert.equal(M.legOf(null), null);
+});
+
+test('burn: Ship.Nav carries plan.legs and under_way.burn; a burning ship in traffic flies its leg', () => {
+  const c = M.catalogOf(SYSTEM);
+  const L = BURNS.KMER.leg;
+  const n = M.navOf({ ...NAV, plan: { ...PLAN_KMER.plan ?? PLAN_KMER, legs: [L, { ...BURNS.Luna.leg, est: true }] } });
+  assert.equal(n.plan.legs.length, 2); assert.equal(n.plan.legs[1].est, true);
+  const u = M.navOf({ ...NAV, plan: 0, under_way: { target: { id: '4850', name: 'KMER' }, phase: 'accel', frac: 0.2, eta: 100, g: 1, burn: L, leg: 0 } });
+  assert.equal(u.under_way.burn.tbody, '4850'); assert.equal(u.under_way.leg, 0); assert.equal(u.under_way.t_final, null);
+  const tr = M.trafficOf({ ...TRAFFIC, vessels: [{ ...TRAFFIC.vessels[0], burning: 1, o: null, parent: null, burn: L }] });
+  const t = BURNS.KMER.samples[3].t;
+  const p = M.vesselPos(c, tr.vessels[0], t, TRAFFIC.now, undefined, tr);
+  const k = M.posOf(c, c.stations.get('4850'), t);
+  const want = BURNS.KMER.samples[3], wantK = want.tpos;
+  // Relative to its target the ship sits where the game put it (the catalog's KMER is propagated, not replayed).
+  const rel = { x: p.x - k.x, y: p.y - k.y }, wrel = { x: want.pos[0] - wantK[0], y: want.pos[1] - wantK[1] };
+  assert.ok(Math.hypot(rel.x - wrel.x, rel.y - wrel.y) * M.AU_KM < 1, 'burning ship rides its target');
+  // A coasting ship ignores a stray burn record.
+  assert.equal(M.trafficOf({ ...TRAFFIC, vessels: [{ ...TRAFFIC.vessels[0], burn: L }] }).vessels[0].burn, null);
+});
+
+test('course: a plan draws its legs from ignition; under way the flown leg, and on a limb route leg 1 the arrival at t_final; nothing flyable, none', () => {
+  const L = BURNS.KMER.leg, L2 = { ...BURNS.Luna.leg, est: true };
+  const plan = M.navOf({ ...NAV, plan: { ...PLAN_KMER, legs: [BURNS.Luna.leg, L2] } });
+  const c = M.courseOf(plan, null);
+  assert.equal(c.legs.length, 2); assert.equal(c.live, false); assert.equal(c.from, BURNS.Luna.leg.t_start);
+  const uw = M.navOf({ ...NAV, plan: 0, under_way: { target: { id: '4513', name: 'Luna' }, phase: 'accel', frac: 0.1, eta: 1, g: 1, burn: L, leg: 1, t_final: 1794710000 } });
+  const u = M.courseOf(uw, null);
+  assert.equal(u.live, true); assert.equal(u.legs.length, 1); assert.deepEqual(u.then, { id: '4513', t: 1794710000 });
+  const leg2 = M.courseOf(M.navOf({ ...NAV, plan: 0, under_way: { target: { id: '4513', name: 'Luna' }, burn: L, leg: 2, t_final: 1794710000 } }), null);
+  assert.equal(leg2.then, null);
+  assert.equal(M.courseOf(M.navOf({ ...NAV, plan: { ...PLAN_KMER } }), null), null, 'an old server: no legs, the straight line');
+  assert.equal(M.courseOf(null, null), null);
+});
+
 test('nav: the captured Ship.Nav parses; plans to a body and to a station; console tags; inactive is null', () => {
   const n = M.navOf(NAV);
   assert.equal(n.ship.squawk, 'V-o444');

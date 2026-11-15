@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- **Real flight paths.** Courses are drawn along the path the game flies: Torchship's turn-and-burn profile is ported to `src/burn.ts`, and it matches `$space:_burn_state` to within 10 m on live legs. The line rides the target and is shown relative to the frame you are viewing. A plotted course is dashed, the flown part solid; there is a flip tick, a limb waypoint, an aim crosshair with an ETA, and the target's arrival position. A limb route's leg 2 is dotted. A blocked plan is red.
+- **Burning ships fly their legs.** Burning ships are positioned on the map by their burn leg rather than straight-line extrapolation, so they stay right under time warp. An admin sees every burning ship's path. A burning ship is shown in its target's local frame (Earth for Luna or a station on Earth) while it is near it.
+- Server contract, additive: `Ship.Nav` `plan.legs`, `under_way.burn`, `under_way.leg`, `under_way.t_final`, and `Space.Traffic` `vessels[].burn`. Without them the straight line is still drawn.
+
 ## 0.1.0
 
 - First version, for Torchship (`Space 1`, `Ship 1`).

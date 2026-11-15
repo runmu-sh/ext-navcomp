@@ -52,6 +52,10 @@ var COPY = {
   fSpeed: "Speed",
   fState: "State",
   fBound: "Bound for",
+  // course marks drawn on the map (uppercase via the canvas)
+  markFlip: "flip",
+  markLimb: "limb",
+  markArrive: (d) => `eta ${d}`,
   fRange: "Range",
   fStations: "Stations",
   fSites: "Landing sites",
@@ -196,6 +200,80 @@ function fmtIC(ic) {
 var fmtKms = (v) => Number.isFinite(v) ? `${n0(v, 2)} km/s` : "\u2014";
 var fmtG = (g) => Number.isFinite(g) ? `${g.toFixed(2)} G` : "\u2014";
 
+// src/burn.ts
+function burnProfile(L, tau) {
+  let D = L.init_dist - L.stop_m;
+  const sg = D < 0 ? -1 : 1;
+  D = Math.abs(D);
+  const { v0: v02, vl, ve, pass, t1, coast: dc } = L;
+  const a = Math.abs(L.a);
+  const vp = v02 + a * t1;
+  const tf = pass ? t1 : t1 + dc + (a > 0 ? (vp - ve) / a : 0);
+  let s, sd;
+  if (tau <= 0) {
+    s = 0;
+    sd = v02;
+  } else if (tau < t1) {
+    s = v02 * tau + 0.5 * a * tau * tau;
+    sd = v02 + a * tau;
+  } else if (pass) {
+    s = D + vp * (tau - t1);
+    sd = vp;
+  } else if (tau < t1 + dc) {
+    s = v02 * t1 + 0.5 * a * t1 * t1 + vp * (tau - t1);
+    sd = vp;
+  } else if (tau < tf) {
+    const q = tf - tau;
+    s = D - ve * q - 0.5 * a * q * q;
+    sd = ve + a * q;
+  } else {
+    s = D + ve * (tau - tf);
+    sd = ve;
+  }
+  let Y = 0, Yd = 0;
+  if (vl !== 0 && tau <= 0) Yd = vl;
+  else if (vl !== 0 && tau < tf) {
+    const x = tau / tf;
+    Y = vl * tau * (1 - x) * (1 - x);
+    Yd = vl * (1 - x) * (1 - 3 * x);
+  }
+  return { R: L.init_dist - sg * s, Rd: -sg * sd, Y, Yd };
+}
+function burnDuration(L) {
+  const a = Math.abs(L.a), vp = L.v0 + a * L.t1;
+  return L.pass ? L.t1 : L.t1 + L.coast + (a > 0 ? (vp - L.ve) / a : 0);
+}
+var burnFlip = (L) => L.pass ? null : L.t_start + L.t1;
+function burnAxis(L) {
+  const bx = L.opos.x - L.tpos0.x - L.toff.x, by = L.opos.y - L.tpos0.y - L.toff.y;
+  const n = Math.hypot(bx, by);
+  return n > 0 ? { x: bx / n, y: by / n } : { x: 0, y: 0 };
+}
+var carried = (L, t) => {
+  const k = (t - L.t_start) / AU_M;
+  return { pos: { x: L.tpos0.x + L.tvel0.x * k, y: L.tpos0.y + L.tvel0.y * k }, vel: L.tvel0 };
+};
+function burnState(L, t, target) {
+  const { R: R2, Rd, Y, Yd } = burnProfile(L, t - L.t_start);
+  const tg = !L.inertial && L.tbody && target?.(L.tbody, t) || carried(L, t);
+  const u = burnAxis(L);
+  const k = R2 / AU_M, j = Y / AU_M;
+  return {
+    pos: { x: tg.pos.x + L.toff.x + u.x * k - u.y * j, y: tg.pos.y + L.toff.y + u.y * k + u.x * j },
+    vel: { x: tg.vel.x + Rd * u.x - Yd * u.y, y: tg.vel.y + Rd * u.y + Yd * u.x }
+  };
+}
+function sampleLeg(L, from, n, target) {
+  const end = L.t_start + burnDuration(L);
+  const t0 = Math.max(L.t_start, Math.min(from, end));
+  const out = [];
+  for (let i = 0; i <= n; i++) {
+    const t = t0 + (end - t0) * i / n;
+    out.push({ t, pos: burnState(L, t, target).pos });
+  }
+  return out;
+}
+
 // src/model.ts
 var isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 var str = (v) => typeof v === "string" ? v : typeof v === "number" ? String(v) : "";
@@ -207,6 +285,32 @@ var num = (v, d = 0) => typeof v === "number" && Number.isFinite(v) ? v : d;
 var bool = (v) => v === true || v === 1;
 var strs = (v) => Array.isArray(v) ? v.map(str).filter(Boolean) : [];
 var vec = (v) => Array.isArray(v) && v.length === 2 && typeof v[0] === "number" && typeof v[1] === "number" ? { x: v[0], y: v[1] } : null;
+var v0 = { x: 0, y: 0 };
+function legOf(v) {
+  if (!isObj(v) || typeof v.t_start !== "number" || typeof v.init_dist !== "number" || typeof v.a !== "number") return null;
+  const opos = vec(v.opos), tpos0 = vec(v.tpos0);
+  if (!opos || !tpos0) return null;
+  return {
+    tbody: ref(v.tbody),
+    opos,
+    tpos0,
+    tvel0: vec(v.tvel0) ?? v0,
+    t_start: v.t_start,
+    init_dist: v.init_dist,
+    stop_m: num(v.stop_m),
+    t1: num(v.t1),
+    coast: num(v.coast),
+    a: v.a,
+    v0: num(v.v0),
+    vl: num(v.vl),
+    ve: num(v.ve),
+    pass: bool(v.pass),
+    inertial: bool(v.inertial),
+    toff: vec(v.toff) ?? v0,
+    est: bool(v.est)
+  };
+}
+var legsOf = (v) => Array.isArray(v) ? v.map(legOf).filter((l) => !!l) : [];
 function elementsOf(v) {
   if (!isObj(v) || typeof v.a !== "number" || typeof v.e !== "number") return null;
   const o = { a: v.a, e: v.e, om: num(v.om), M0: num(v.M0), ep: num(v.ep), rate: num(v.rate, 1) };
@@ -248,7 +352,7 @@ function trafficOf(d) {
     if (!isObj(v) || !str(v.id)) continue;
     const pos = vec(v.pos), vel = vec(v.vel);
     if (!pos) continue;
-    vessels.push({ kind: "ship", id: str(v.id), name: str(v.name) || str(v.id), hull: str(v.hull), parent: ref(v.parent) || null, o: elementsOf(v.o), pos, vel: vel ?? { x: 0, y: 0 }, burning: bool(v.burning), target: ref(v.target), self: bool(v.self) });
+    vessels.push({ kind: "ship", id: str(v.id), name: str(v.name) || str(v.id), hull: str(v.hull), parent: ref(v.parent) || null, o: elementsOf(v.o), pos, vel: vel ?? { x: 0, y: 0 }, burning: bool(v.burning), target: ref(v.target), self: bool(v.self), burn: bool(v.burning) ? legOf(v.burn) : null });
   }
   return { admin: bool(d.admin), now: num(d.now), ic: num(d.ic), rate: num(d.rate, 1) || 1, vessels };
 }
@@ -278,13 +382,14 @@ function planOf(v) {
     eta: opt(v.eta),
     vp_kms: opt(v.vp_kms),
     aim: vec(v.aim),
-    waypoint: vec(v.waypoint)
+    waypoint: vec(v.waypoint),
+    legs: legsOf(v.legs)
   };
 }
 function underWayOf(v) {
   if (!isObj(v)) return null;
   const t = isObj(v.target) ? v.target : {};
-  return { target: { id: str(t.id), name: str(t.name) }, maneuver: str(v.maneuver), phase: str(v.phase), label: str(v.label), frac: Math.min(1, Math.max(0, num(v.frac))), eta: num(v.eta), g: num(v.g), pass: bool(v.pass), route: str(v.route), replan: str(v.replan), warnings: strs(v.warnings), aim: vec(v.aim) };
+  return { target: { id: str(t.id), name: str(t.name) }, maneuver: str(v.maneuver), phase: str(v.phase), label: str(v.label), frac: Math.min(1, Math.max(0, num(v.frac))), eta: num(v.eta), g: num(v.g), pass: bool(v.pass), route: str(v.route), replan: str(v.replan), warnings: strs(v.warnings), aim: vec(v.aim), burn: legOf(v.burn), leg: num(v.leg), t_final: typeof v.t_final === "number" && v.t_final > 0 ? v.t_final : null };
 }
 function navOf(d) {
   if (!isObj(d) || !bool(d.active)) return null;
@@ -332,15 +437,30 @@ function posOf(cat, thing, t, memo) {
   memo?.set(thing.id, p);
   return p;
 }
-function vesselPos(cat, v, t, sentAt, memo) {
+function vesselPos(cat, v, t, sentAt, memo, traffic) {
+  return vesselState(cat, v, t, sentAt, traffic ?? null, 1, memo).pos;
+}
+function vesselState(cat, v, t, sentAt, traffic, depth = 1, memo) {
   const parent = v.parent && cat ? cat.bodies.get(v.parent) : void 0;
   if (!v.burning && v.o && parent && cat) {
     const base = posOf(cat, parent, t, memo);
     const l = localPos(v.o, parent.mu, t);
-    return { x: base.x + l.x, y: base.y + l.y };
+    return { pos: { x: base.x + l.x, y: base.y + l.y }, vel: v.vel };
   }
+  if (v.burning && v.burn && cat) return burnState(v.burn, t, depth < 3 ? targetAt(cat, traffic, sentAt, depth + 1) : void 0);
   const dt = t - sentAt;
-  return { x: v.pos.x + v.vel.x * dt / AU_M, y: v.pos.y + v.vel.y * dt / AU_M };
+  return { pos: { x: v.pos.x + v.vel.x * dt / AU_M, y: v.pos.y + v.vel.y * dt / AU_M }, vel: v.vel };
+}
+function targetAt(cat, traffic, sentAt, depth = 1) {
+  return (id, t) => {
+    const thing = cat.bodies.get(id) ?? cat.stations.get(id);
+    if (thing) {
+      const a = posOf(cat, thing, t - 1), b = posOf(cat, thing, t + 1), p = posOf(cat, thing, t);
+      return { pos: p, vel: { x: (b.x - a.x) / 2 * AU_M, y: (b.y - a.y) / 2 * AU_M } };
+    }
+    const v = traffic?.vessels.find((x) => x.id === id);
+    return v ? vesselState(cat, v, t, sentAt, traffic, depth) : null;
+  };
 }
 function chainOf(cat, id) {
   const out = [];
@@ -366,7 +486,19 @@ function frameExtent(cat, id, vessels = []) {
   }
   return m;
 }
-var frameOfVessel = (cat, v) => !v.burning && v.parent && cat.bodies.has(v.parent) ? v.parent : cat.rootId;
+function frameOfVessel(cat, v) {
+  if (!v.burning) return v.parent && cat.bodies.has(v.parent) ? v.parent : cat.rootId;
+  const tb = v.burn?.tbody || v.target;
+  const tgt = cat.bodies.get(tb) ?? cat.stations.get(tb);
+  if (!tgt) return cat.rootId;
+  const start = tgt.kind === "body" && hasFrame(cat, tgt.id) ? tgt.id : tgt.parent;
+  for (const f of start ? chainOf(cat, start).reverse() : []) {
+    if (f.id === cat.rootId) break;
+    const c = posOf(cat, f, cat.now);
+    if (Math.hypot(v.pos.x - c.x, v.pos.y - c.y) < 3 * frameExtent(cat, f.id)) return f.id;
+  }
+  return cat.rootId;
+}
 
 // src/map.ts
 import { h } from "@muclient/sdk";
@@ -660,7 +792,7 @@ var MapView = class {
       const f = frameOfVessel(cat, v);
       if (f === this.frame) return true;
       if (v.self) return chainOf(cat, f).some((b) => b.id === this.frame);
-      return v.burning && this.frame === cat.rootId && chain.size > 0;
+      return v.burning && chainOf(cat, f).some((b) => b.id === this.frame) && chain.size > 0;
     });
   }
   detail(cat, t, nav, close) {
@@ -1031,37 +1163,39 @@ var MapView = class {
       this.picks.push({ x: sp.x, y: sp.y, r: 11, id: s.id });
     }
     const sentAt = traffic?.now ?? t;
+    const tgt = targetAt(cat, traffic ?? null, sentAt);
     const me = traffic?.vessels.find((v) => v.self);
-    const aim = nav?.under_way?.aim ?? nav?.plan?.aim ?? null;
-    const wp = nav?.plan?.waypoint ?? null;
-    if (me && aim && ships.includes(me)) {
-      const a = proj(vesselPos(cat, me, t, sentAt, memo));
-      ctx.strokeStyle = nav?.plan?.blocked ? P.alert : P.bright;
-      ctx.lineWidth = 1;
-      ctx.setLineDash([5, 4]);
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      if (wp && (wp.x !== aim.x || wp.y !== aim.y)) {
-        const w = proj(wp);
-        ctx.lineTo(w.x, w.y);
+    const course = courseOf(nav, me ?? null);
+    if (me && ships.includes(me) && course) {
+      const blocked = !!nav?.plan?.blocked;
+      this.drawCourse(ctx, proj, cat, center, frame.id, t, course, tgt, blocked ? P.alert : P.bright, P, label);
+    } else if (me && ships.includes(me)) {
+      const aim = nav?.under_way?.aim ?? nav?.plan?.aim ?? null;
+      const wp = nav?.plan?.waypoint ?? null;
+      if (aim) {
+        const a = proj(vesselPos(cat, me, t, sentAt, memo, traffic));
+        ctx.strokeStyle = nav?.plan?.blocked ? P.alert : P.bright;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        if (wp && (wp.x !== aim.x || wp.y !== aim.y)) {
+          const w = proj(wp);
+          ctx.lineTo(w.x, w.y);
+        }
+        const b = proj(aim);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        crosshair(ctx, b, nav?.plan?.blocked ? P.alert : P.bright);
       }
-      const b = proj(aim);
-      ctx.lineTo(b.x, b.y);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.strokeStyle = nav?.plan?.blocked ? P.alert : P.bright;
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, 5, 0, TAU);
-      ctx.moveTo(b.x - 8, b.y);
-      ctx.lineTo(b.x + 8, b.y);
-      ctx.moveTo(b.x, b.y - 8);
-      ctx.lineTo(b.x, b.y + 8);
-      ctx.stroke();
     }
+    for (const v of ships) if (v.burning && v.burn && !v.self) this.drawCourse(ctx, proj, cat, center, frame.id, t, { legs: [v.burn], from: v.burn.t_start, live: true }, tgt, P.gold, P, null, 0.45);
     for (const v of ships) {
-      const sp = proj(vesselPos(cat, v, t, sentAt, memo));
+      const sp = proj(vesselPos(cat, v, t, sentAt, memo, traffic));
       const col = v.self ? P.ok : v.burning ? P.gold : P.fg;
-      const ang = Math.atan2(-v.vel.y, v.vel.x);
+      const vv = v.burning && v.burn ? burnState(v.burn, t, tgt).vel : v.vel;
+      const ang = Math.atan2(-vv.y, vv.x);
       if (v.burning) {
         ctx.strokeStyle = P.gold;
         ctx.globalAlpha = 0.6;
@@ -1101,7 +1235,116 @@ var MapView = class {
     }
     void AU_M;
   }
+  /**
+   * One course: each leg sampled on the game's own profile from `from` to its arrival, drawn RELATIVE TO THE FRAME
+   * BODY at each instant (the path the ship traces as seen in this frame), the flown part solid and the rest dashed;
+   * a tick at the flip, a diamond at a limb waypoint, a crosshair at the aim with the time to go, and the target
+   * where it will be at arrival (a hollow square). `label` null: no marks (other ships).
+   */
+  drawCourse(ctx, proj, cat, center, frameId, t, course, tgt, color, P, label, alpha = 1) {
+    const frameBody = cat.bodies.get(frameId);
+    const rel = (p, at) => {
+      if (frameId === cat.rootId) return p;
+      const c = posOf(cat, frameBody, at);
+      return { x: center.x + p.x - c.x, y: center.y + p.y - c.y };
+    };
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = color;
+    const N2 = 96;
+    course.legs.forEach((L, i) => {
+      const t0 = i === 0 ? Math.max(L.t_start, course.from) : L.t_start;
+      const end = L.t_start + burnDuration(L);
+      if (!(end > t0)) return;
+      const pts = [];
+      for (let k = 0; k <= N2; k++) {
+        const at = t0 + (end - t0) * (1 - Math.cos(Math.PI * k / N2)) / 2;
+        pts.push({ t: at, s: proj(rel(burnState(L, at, tgt).pos, at)) });
+      }
+      const stroke = (from, to, dash) => {
+        const seg = pts.filter((q) => q.t >= from && q.t <= to);
+        if (seg.length < 2) return;
+        ctx.setLineDash(dash);
+        ctx.beginPath();
+        seg.forEach((q, j) => j ? ctx.lineTo(q.s.x, q.s.y) : ctx.moveTo(q.s.x, q.s.y));
+        ctx.stroke();
+      };
+      const now = Math.min(Math.max(t, t0), end);
+      if (course.live) {
+        stroke(t0, now, []);
+        stroke(now, end, [5, 4]);
+      } else stroke(t0, end, L.est ? [2, 4] : [5, 4]);
+      ctx.setLineDash([]);
+      if (!label) return;
+      const fl = burnFlip(L);
+      if (fl && fl > t0 && fl < end) {
+        const a = proj(rel(burnState(L, fl - 1, tgt).pos, fl - 1)), b = proj(rel(burnState(L, fl + 1, tgt).pos, fl + 1));
+        const nx = -(b.y - a.y), ny = b.x - a.x, n = Math.hypot(nx, ny) || 1;
+        const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        ctx.beginPath();
+        ctx.moveTo(m.x - 5 * nx / n, m.y - 5 * ny / n);
+        ctx.lineTo(m.x + 5 * nx / n, m.y + 5 * ny / n);
+        ctx.stroke();
+        if (fl > t) label(COPY.markFlip, m.x, m.y + 7, false, color, 3);
+      }
+      const last = i === course.legs.length - 1;
+      const ep = pts.at(-1).s;
+      if (!last) {
+        diamond(ctx, ep.x, ep.y, 3.5, color);
+        label(COPY.markLimb, ep.x, ep.y + 7, false, P.dim, 3);
+        return;
+      }
+      if (course.then) {
+        const tg2 = tgt(course.then.id, course.then.t);
+        diamond(ctx, ep.x, ep.y, 3.5, color);
+        label(COPY.markLimb, ep.x, ep.y + 7, false, P.dim, 3);
+        if (!tg2) return;
+        const q = proj(rel(tg2.pos, course.then.t));
+        ctx.setLineDash([2, 4]);
+        ctx.beginPath();
+        ctx.moveTo(ep.x, ep.y);
+        ctx.lineTo(q.x, q.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        crosshair(ctx, q, color);
+        const left2 = course.then.t - t;
+        if (left2 > 0) label(COPY.markArrive(fmtDur(left2 * cat.rate)), q.x, q.y + 10, false, color, 8);
+        return;
+      }
+      crosshair(ctx, ep, color);
+      const tg = L.tbody ? tgt(L.tbody, end) : null;
+      if (tg && L.stop_m > 0) {
+        const q = proj(rel(tg.pos, end));
+        ctx.strokeRect(q.x - 3.5, q.y - 3.5, 7, 7);
+      }
+      const left = (course.tFinal ?? end) - t;
+      if (left > 0) label(COPY.markArrive(fmtDur(left * cat.rate)), ep.x, ep.y + 10, false, color, 8);
+    });
+    ctx.restore();
+  }
 };
+function courseOf(nav, me) {
+  const uw = nav?.under_way;
+  if (uw) {
+    const L = uw.burn ?? me?.burn ?? null;
+    return L ? { legs: [L], from: L.t_start, live: true, tFinal: uw.t_final, then: uw.leg === 1 && uw.t_final && uw.target.id ? { id: uw.target.id, t: uw.t_final } : null } : null;
+  }
+  const p = nav?.plan;
+  if (p && !p.lost && p.legs.length) return { legs: p.legs, from: p.legs[0].t_start, live: false };
+  return null;
+}
+function crosshair(ctx, b, color) {
+  ctx.strokeStyle = color;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.arc(b.x, b.y, 5, 0, TAU);
+  ctx.moveTo(b.x - 8, b.y);
+  ctx.lineTo(b.x + 8, b.y);
+  ctx.moveTo(b.x, b.y - 8);
+  ctx.lineTo(b.x, b.y + 8);
+  ctx.stroke();
+}
 function bodyColor(b, P) {
   return b.type === "star" ? P.gold : b.type === "planet" ? P.bright : b.type === "belt" ? P.faint : P.dim;
 }
@@ -1640,9 +1883,15 @@ export {
   NAV,
   NAVCOMP_CSS,
   SETTINGS,
+  burnAxis,
+  burnDuration,
+  burnFlip,
+  burnProfile,
+  burnState,
   catalogOf,
   chainOf,
   clampG,
+  courseOf,
   index_default as default,
   elementsOf,
   ellipse,
@@ -1652,6 +1901,7 @@ export {
   fmtIC,
   fmtKms,
   frameExtent,
+  legOf,
   localPos,
   meanMotion,
   navName,
@@ -1661,9 +1911,12 @@ export {
   planOf,
   posOf,
   projector,
+  sampleLeg,
   solveKepler,
   tagOf,
+  targetAt,
   targetRows,
   trafficOf,
-  vesselPos
+  vesselPos,
+  vesselState
 };

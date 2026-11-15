@@ -7,6 +7,7 @@
  *   Ship.Nav       the console readout (=status / =nav as data) while seated; `{active: false}` otherwise.
  */
 import { AU_M, localPos, type Elements, type Vec } from './orbit';
+import { burnState, type BurnLeg, type TargetAt } from './burn';
 
 export type BodyType = 'star' | 'planet' | 'moon' | 'belt';
 export interface Influence { factions: string[]; r: number }
@@ -18,7 +19,7 @@ export interface Catalog {
   admin: boolean; now: number; ic: number; rate: number; rootId: string;
   bodies: Map<string, Body>; stations: Map<string, Station>; sites: Map<string, Site>; factions: Map<string, Faction>;
 }
-export interface Vessel { kind: 'ship'; id: string; name: string; hull: string; parent: string | null; o: Elements | null; pos: Vec; vel: Vec; burning: boolean; target: string; self: boolean }
+export interface Vessel { kind: 'ship'; id: string; name: string; hull: string; parent: string | null; o: Elements | null; pos: Vec; vel: Vec; burning: boolean; target: string; self: boolean; burn: BurnLeg | null }
 export interface Traffic { admin: boolean; now: number; ic: number; rate: number; vessels: Vessel[] }
 
 export interface NavContact { id: string; name: string; kind: 'body' | 'station' | 'ship'; dist_au: number }
@@ -26,8 +27,12 @@ export interface NavPlan {
   lost: boolean; target: { id: string; name: string; kind: string }; mode: string; maneuver: string; g: number; dist_m: number;
   errors: string[]; warnings: string[]; confirm: boolean; blocked: boolean; pass: boolean; pct: number; alt_m: number | null;
   route: string; closing_kms: number | null; eta: number | null; vp_kms: number | null; aim: Vec | null; waypoint: Vec | null;
+  /** The burn :start would light now, then a limb route's leg 2 (an estimate). Empty when there is no flyable leg. */
+  legs: BurnLeg[];
 }
-export interface NavUnderWay { target: { id: string; name: string }; maneuver: string; phase: string; label: string; frac: number; eta: number; g: number; pass: boolean; route: string; replan: string; warnings: string[]; aim: Vec | null }
+export interface NavUnderWay { target: { id: string; name: string }; maneuver: string; phase: string; label: string; frac: number; eta: number; g: number; pass: boolean; route: string; replan: string; warnings: string[]; aim: Vec | null;
+  /** The leg being flown; leg 1 or 2 of a limb route (0: no route) and the whole trip's arrival (real s). */
+  burn: BurnLeg | null; leg: number; t_final: number | null }
 export interface Nav {
   active: true; console: string; ship: { id: string; name: string; squawk: string }; scrambled: string[];
   pos: Vec | null; vel: Vec | null;
@@ -47,6 +52,20 @@ const num = (v: unknown, d = 0) => (typeof v === 'number' && Number.isFinite(v) 
 const bool = (v: unknown) => v === true || v === 1;
 const strs = (v: unknown) => (Array.isArray(v) ? v.map(str).filter(Boolean) : []);
 const vec = (v: unknown): Vec | null => (Array.isArray(v) && v.length === 2 && typeof v[0] === 'number' && typeof v[1] === 'number' ? { x: v[0], y: v[1] } : null);
+
+const v0 = { x: 0, y: 0 };
+/** One burn leg (#4709:_burn_desc as sent by $gmcp:_burn_wire); null when it is not one. */
+export function legOf(v: unknown): BurnLeg | null {
+  if (!isObj(v) || typeof v.t_start !== 'number' || typeof v.init_dist !== 'number' || typeof v.a !== 'number') return null;
+  const opos = vec(v.opos), tpos0 = vec(v.tpos0);
+  if (!opos || !tpos0) return null;
+  return {
+    tbody: ref(v.tbody), opos, tpos0, tvel0: vec(v.tvel0) ?? v0, t_start: v.t_start, init_dist: v.init_dist, stop_m: num(v.stop_m),
+    t1: num(v.t1), coast: num(v.coast), a: v.a, v0: num(v.v0), vl: num(v.vl), ve: num(v.ve), pass: bool(v.pass), inertial: bool(v.inertial),
+    toff: vec(v.toff) ?? v0, est: bool(v.est),
+  };
+}
+const legsOf = (v: unknown) => (Array.isArray(v) ? v.map(legOf).filter((l): l is BurnLeg => !!l) : []);
 
 export function elementsOf(v: unknown): Elements | null {
   if (!isObj(v) || typeof v.a !== 'number' || typeof v.e !== 'number') return null;
@@ -93,7 +112,7 @@ export function trafficOf(d: unknown): Traffic | null {
     if (!isObj(v) || !str(v.id)) continue;
     const pos = vec(v.pos), vel = vec(v.vel);
     if (!pos) continue;
-    vessels.push({ kind: 'ship', id: str(v.id), name: str(v.name) || str(v.id), hull: str(v.hull), parent: ref(v.parent) || null, o: elementsOf(v.o), pos, vel: vel ?? { x: 0, y: 0 }, burning: bool(v.burning), target: ref(v.target), self: bool(v.self) });
+    vessels.push({ kind: 'ship', id: str(v.id), name: str(v.name) || str(v.id), hull: str(v.hull), parent: ref(v.parent) || null, o: elementsOf(v.o), pos, vel: vel ?? { x: 0, y: 0 }, burning: bool(v.burning), target: ref(v.target), self: bool(v.self), burn: bool(v.burning) ? legOf(v.burn) : null });
   }
   return { admin: bool(d.admin), now: num(d.now), ic: num(d.ic), rate: num(d.rate, 1) || 1, vessels };
 }
@@ -109,14 +128,14 @@ export function planOf(v: unknown): NavPlan | null {
   return {
     lost: bool(v.lost), target, mode: str(v.mode), maneuver: str(v.maneuver), g: num(v.g), dist_m: num(v.dist_m, NaN),
     errors: strs(v.errors), warnings: strs(v.warnings), confirm: bool(v.confirm), blocked: bool(v.blocked), pass: bool(v.pass), pct: num(v.pct, NaN),
-    alt_m: opt(v.alt_m), route: str(v.route), closing_kms: opt(v.closing_kms), eta: opt(v.eta), vp_kms: opt(v.vp_kms), aim: vec(v.aim), waypoint: vec(v.waypoint),
+    alt_m: opt(v.alt_m), route: str(v.route), closing_kms: opt(v.closing_kms), eta: opt(v.eta), vp_kms: opt(v.vp_kms), aim: vec(v.aim), waypoint: vec(v.waypoint), legs: legsOf(v.legs),
   };
 }
 
 function underWayOf(v: unknown): NavUnderWay | null {
   if (!isObj(v)) return null;
   const t = isObj(v.target) ? v.target : {};
-  return { target: { id: str(t.id), name: str(t.name) }, maneuver: str(v.maneuver), phase: str(v.phase), label: str(v.label), frac: Math.min(1, Math.max(0, num(v.frac))), eta: num(v.eta), g: num(v.g), pass: bool(v.pass), route: str(v.route), replan: str(v.replan), warnings: strs(v.warnings), aim: vec(v.aim) };
+  return { target: { id: str(t.id), name: str(t.name) }, maneuver: str(v.maneuver), phase: str(v.phase), label: str(v.label), frac: Math.min(1, Math.max(0, num(v.frac))), eta: num(v.eta), g: num(v.g), pass: bool(v.pass), route: str(v.route), replan: str(v.replan), warnings: strs(v.warnings), aim: vec(v.aim), burn: legOf(v.burn), leg: num(v.leg), t_final: typeof v.t_final === 'number' && v.t_final > 0 ? v.t_final : null };
 }
 
 /** `Ship.Nav` → the console; null for `{active: false}` or anything that is not one. */
@@ -168,18 +187,42 @@ export function posOf(cat: Catalog, thing: Body | Station | Site, t: number, mem
 }
 
 /**
- * A ship at real time `t`: coasting ones by their elements around their parent; burning ones (and any without
- * elements) carried on from the reported position at the reported velocity (m per real second).
+ * A ship at real time `t`: coasting ones by their elements around their parent; burning ones on their burn leg
+ * (the game's own profile, riding the target); anything else carried on from the reported position at the reported
+ * velocity (m per real second). `traffic` lets a burn that chases a ship find it.
  */
-export function vesselPos(cat: Catalog | null, v: Vessel, t: number, sentAt: number, memo?: Map<string, Vec>): Vec {
+export function vesselPos(cat: Catalog | null, v: Vessel, t: number, sentAt: number, memo?: Map<string, Vec>, traffic?: Traffic | null): Vec {
+  return vesselState(cat, v, t, sentAt, traffic ?? null, 1, memo).pos;
+}
+
+/** A ship's position (AU) and velocity (m per real s) at `t`. depth guards a burn chasing a burn chasing us. */
+export function vesselState(cat: Catalog | null, v: Vessel, t: number, sentAt: number, traffic: Traffic | null, depth = 1, memo?: Map<string, Vec>): { pos: Vec; vel: Vec } {
   const parent = v.parent && cat ? cat.bodies.get(v.parent) : undefined;
   if (!v.burning && v.o && parent && cat) {
     const base = posOf(cat, parent, t, memo);
     const l = localPos(v.o, parent.mu, t);
-    return { x: base.x + l.x, y: base.y + l.y };
+    return { pos: { x: base.x + l.x, y: base.y + l.y }, vel: v.vel };
   }
+  if (v.burning && v.burn && cat) return burnState(v.burn, t, depth < 3 ? targetAt(cat, traffic, sentAt, depth + 1) : undefined);
   const dt = t - sentAt;
-  return { x: v.pos.x + (v.vel.x * dt) / AU_M, y: v.pos.y + (v.vel.y * dt) / AU_M };
+  return { pos: { x: v.pos.x + (v.vel.x * dt) / AU_M, y: v.pos.y + (v.vel.y * dt) / AU_M }, vel: v.vel };
+}
+
+/**
+ * Where a burn's target is at any time: a body or station from the catalog, a ship from the traffic. Velocity in m
+ * per real s (bodies by a 2 s central difference). null for what the map cannot see: the leg then carries on its
+ * ignition snapshot, exactly as the game does for a target that has left space.
+ */
+export function targetAt(cat: Catalog, traffic: Traffic | null, sentAt: number, depth = 1): TargetAt {
+  return (id, t) => {
+    const thing = cat.bodies.get(id) ?? cat.stations.get(id);
+    if (thing) {
+      const a = posOf(cat, thing, t - 1), b = posOf(cat, thing, t + 1), p = posOf(cat, thing, t);
+      return { pos: p, vel: { x: ((b.x - a.x) / 2) * AU_M, y: ((b.y - a.y) / 2) * AU_M } };
+    }
+    const v = traffic?.vessels.find((x) => x.id === id);
+    return v ? vesselState(cat, v, t, sentAt, traffic, depth) : null;
+  };
 }
 
 /** The chain of frames from the root down to `id` (a body). */
@@ -206,5 +249,21 @@ export function frameExtent(cat: Catalog, id: string, vessels: Vessel[] = []): n
   return m;
 }
 
-/** The frame a ship is best seen in: its parent when it coasts around one, else the root. */
-export const frameOfVessel = (cat: Catalog, v: Vessel) => (!v.burning && v.parent && cat.bodies.has(v.parent) ? v.parent : cat.rootId);
+/**
+ * The frame a ship is best seen in: its parent when it coasts around one; under thrust, the deepest frame on its
+ * target's chain (the target itself when it is a body with a frame, else up through its parents: Earth for a leg
+ * riding Earth, for Luna, or for a station on Earth) that the ship is inside (three of that frame's extents); else the root.
+ */
+export function frameOfVessel(cat: Catalog, v: Vessel): string {
+  if (!v.burning) return v.parent && cat.bodies.has(v.parent) ? v.parent : cat.rootId;
+  const tb = v.burn?.tbody || v.target;
+  const tgt = cat.bodies.get(tb) ?? cat.stations.get(tb);
+  if (!tgt) return cat.rootId;
+  const start = tgt.kind === 'body' && hasFrame(cat, tgt.id) ? tgt.id : tgt.parent;
+  for (const f of start ? chainOf(cat, start).reverse() : []) {
+    if (f.id === cat.rootId) break;
+    const c = posOf(cat, f, cat.now);
+    if (Math.hypot(v.pos.x - c.x, v.pos.y - c.y) < 3 * frameExtent(cat, f.id)) return f.id;
+  }
+  return cat.rootId;
+}
